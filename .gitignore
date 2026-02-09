@@ -195,3 +195,5 @@ nohup.out
 resultados_benchmark/
 tools/evaluator/*.csv
 !logo.png
+removable_files/
+notebooks/
