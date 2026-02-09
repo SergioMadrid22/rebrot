@@ -137,7 +137,7 @@ with gr.Blocks(css="""
             interactive=True
         )
         mask_dilatation = gr.Slider(
-            minimum=0, maximum=100, value=100, step=1, label="Dilatacion Mask", interactive=True)
+            minimum=0, maximum=500, value=200, step=1, label="Dilatacion Mask", interactive=True)
 
     error_message_detection = gr.Markdown()
     with gr.Row():
@@ -361,12 +361,6 @@ with gr.Blocks(css="""
                     x2 = xmax + padding
                     y2 = ymax + padding
 
-                    """
-                    x1 = int(boxes[i][1]) - padding
-                    y1 = int(boxes[i][3]) - padding
-                    x2 = int(boxes[i][0]) + padding
-                    y2 = int(boxes[i][2]) + padding
-                    """
                     face = crop_image(image, x1, y1, x2, y2)
 
                     face_mask = crop_image(
@@ -454,5 +448,10 @@ with gr.Blocks(css="""
 delete_files([RUTA_MASCARA, RUTA_IMAGEN_FINAL])
 
 # **Lanzar la interfaz**
-demo.launch(server_name="0.0.0.0", server_port=7860, debug=True, auth=(os.environ.get(
-    "APP_USER"), os.environ.get("APP_PASSWORD")))
+demo.launch(
+    #server_name="0.0.0.0",  # For deployment
+    server_name = "127.0.0.1", # For testing
+    server_port=7860, 
+    debug=True, 
+    #auth=(os.environ.get("APP_USER"), os.environ.get("APP_PASSWORD"))
+)

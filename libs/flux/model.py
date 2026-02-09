@@ -1,6 +1,8 @@
 import torch
 from diffusers import FluxFillPipeline
 from diffusers.utils import load_image
+from transformers import BitsAndBytesConfig
+from diffusers import FluxTransformer2DModel
 import os
 from PIL import Image
 import numpy as np
@@ -9,8 +11,31 @@ MODEL_IMG_DIM = 1024
 
 class FluxImpainting:
     def __init__(self, device: str):
-        self.pipe = FluxFillPipeline.from_pretrained("black-forest-labs/FLUX.1-Fill-dev", torch_dtype=torch.bfloat16, token=os.environ.get("HUGGINGFACE_HUB_TOKEN")).to(device)
-        print("Modelo Flux Impainting descargado ✅")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True
+        )
+
+        print("SERVIDOR: Cargando Transformer de Flux en 4-bit...")
+        transformer = FluxTransformer2DModel.from_pretrained(
+            "black-forest-labs/FLUX.1-Fill-dev",
+            subfolder="transformer",
+            quantization_config=quantization_config,
+            torch_dtype=torch.bfloat16
+        )
+
+        self.pipe = FluxFillPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-Fill-dev", 
+            transformer=transformer,
+            torch_dtype=torch.bfloat16, 
+            token=os.environ.get("HUGGINGFACE_HUB_TOKEN"),
+            #low_cpu_mem_usage=True,
+        ).to(device)
+
+        #self.pipe.enable_model_cpu_offload()
+        print("Modelo Flux Impainting (4-bit NF4) cargado ✅")
 
     def impaint(self, image_path: str, mask_path: str, prompt: str, negative_prompt: str, strength: float, guidance: float, steps: int):
         # Carga las imágenes originales
@@ -50,7 +75,7 @@ class FluxImpainting:
             guidance_scale=guidance,
             num_inference_steps=steps,
             max_sequence_length=512,
-            generator=torch.Generator("cpu").manual_seed(0)
+            generator=torch.Generator().manual_seed(0)
         ).images[0]
 
         # Recorta la parte central que contiene la imagen original redimensionada
