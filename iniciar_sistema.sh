@@ -1,34 +1,30 @@
 #!/bin/bash
+export HF_HUB_DISABLE_PROGRESS_BARS=1
 
-VENV_DIR=".venv"
-PORT_API=7890
-PORT_GUI=7860
+cd "$(dirname "$0")"
+# Directorios
+VENV_PYTHON="./venv/bin/python3"
+LOG_DIR="logs"
 
-# 1. Limpieza
-fuser -k $PORT_API/tcp
-fuser -k $PORT_GUI/tcp
+# 1. Crear carpeta de logs si no existe
+mkdir -p $LOG_DIR
+rm $LOG_DIR/*.log 2>/dev/null
+
+# 2. Limpieza total para empezar de cero
+echo "Limpiando procesos previos..."
+pkill -f watchdog.py
+pkill -f inference_server.py
+pkill -f gui_app.py
 pkill -f loophole
 
-# 2. Activar entorno
-source $VENV_DIR/bin/activate
+# 3. Lanzar el WATCHDOG (Watchdog)
+# El watchdog se encargará de lanzar inference_server, gui_app y loophole
+echo "Lanzando el Watchdog..."
+nohup $VENV_PYTHON -u watchdog.py > $LOG_DIR/watchdog.log 2>&1 &
+WATCHDOG_PID=$!
 
-# 3. Lanzar Servidor de Inferencia (Backend)
-echo "🧠 Iniciando Servidor de Inferencia (GPU)..."
-nohup python3 -u inference_server.py > logs/server.log 2>&1 &
-SERVER_PID=$!
+echo "--------------------------------------------------------"
+echo "Watchdog iniciado en segundo plano (PID: $WATCHDOG_PID)."
+echo "Puedes ver los logs en $LOG_DIR/"
 
-# Esperar a que el servidor responda
-echo "⏳ Esperando al servidor de inferencia..."
-while ! nc -z localhost $PORT_API; do sleep 1; done
-echo "✅ Servidor de Inferencia ONLINE."
-
-# 4. Lanzar Interfaz Gráfica (Frontend)
-echo "🖥️ Iniciando GUI Gradio..."
-nohup python3 -u gui_app.py > logs/gui.log 2>&1 &
-
-# Esperar a GUI
-while ! nc -z localhost $PORT_GUI; do sleep 1; done
-
-# 5. Túnel
-echo "🌍 Abriendo túnel Loophole..."
-./loophole http $PORT_GUI --hostname rebrot-vrain > logs/loophole.log 2>&1 &
+echo "--------------------------------------------------------"

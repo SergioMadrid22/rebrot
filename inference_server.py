@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 import io
 import os
 import gc
@@ -6,20 +8,23 @@ import uuid
 import json
 import torch
 import cv2
-from dotenv import load_dotenv
 import numpy as np
 from contextlib import contextmanager
-from typing import List, Optional
 from PIL import Image, ImageOps
 import threading
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import Response, JSONResponse
 import uvicorn
+import traceback
+import time
+import logging
 
 from libs.sam2.model import SAM2
 from libs.langsam.model import LangSAMFaceExtractor
 from libs.stable_diffusion.impaint.model import SDImpainting
 from libs.yolov8.model import YOLOV8
+from libs.unet.model import UNetInference
+from libs.segformer.model import SegformerInference
 from libs.flux.model import FluxImpainting
 from libs.qwen.model import QwenImpainting
 from utils import (
@@ -30,70 +35,117 @@ from utils import (
     crop_image
 )
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
 import transformers.modeling_utils
+from transformers.generation.configuration_utils import GenerationConfig
+from transformers.configuration_utils import PretrainedConfig
+
+# 1. Parche para get_head_mask
+def get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked=False):
+    if head_mask is not None:
+        head_mask = self._convert_head_mask_to_5d(head_mask, num_hidden_layers)
+        if is_attention_chunked is True:
+            head_mask = head_mask.unsqueeze(-1)
+    else:
+        head_mask = [None] * num_hidden_layers
+    return head_mask
 
 if not hasattr(transformers.modeling_utils.PreTrainedModel, "get_head_mask"):
-    def get_head_mask(self, head_mask, num_hidden_layers, is_attention_chunked=False):
-        if head_mask is not None:
-            head_mask = self._convert_head_mask_to_5d(head_mask, num_hidden_layers)
-            if is_attention_chunked is True:
-                head_mask = head_mask.unsqueeze(-1)
-        else:
-            head_mask = [None] * num_hidden_layers
-        return head_mask
-    
     transformers.modeling_utils.PreTrainedModel.get_head_mask = get_head_mask
 
-    orig_tensor_to = torch.Tensor.to
-
-def patched_tensor_to(*args, **kwargs):
-    # Si la librería intenta pasar un objeto device en el lugar del dtype, lo movemos a 'device'
-    if "dtype" in kwargs and isinstance(kwargs["dtype"], torch.device):
-        kwargs["device"] = kwargs.pop("dtype")
-    return orig_tensor_to(*args, **kwargs)
-
+# 2. Parche para torch.Tensor.to (Error de dtype=device)
+orig_tensor_to = torch.Tensor.to
+def patched_tensor_to(self, *args, **kwargs):
+    if "dtype" in kwargs and kwargs["dtype"] is not None:
+        if not isinstance(kwargs["dtype"], torch.dtype):
+            kwargs["device"] = kwargs.pop("dtype")
+    return orig_tensor_to(self, *args, **kwargs)
 torch.Tensor.to = patched_tensor_to
 
+# 3. PARCHE PARA RESTA DE BOOLEANOS
 orig_sub = torch.Tensor.__sub__
 def patched_sub(self, other):
     if self.dtype == torch.bool:
-        # Si es una resta de booleanos (común en GroundingDINO), convertimos a entero
-        return orig_sub(self.to(torch.int8), other).to(torch.bool)
+        return orig_sub(self.to(torch.int8), other)
     return orig_sub(self, other)
+torch.Tensor.__sub__ = patched_sub
 
-# También parcheamos la resta desde el lado derecho (rsub) por si acaso
 orig_rsub = torch.Tensor.__rsub__
 def patched_rsub(self, other):
     if self.dtype == torch.bool:
-        return orig_rsub(self.to(torch.int8), other).to(torch.bool)
+        # Esto maneja el caso (1.0 - tensor_booleano)
+        return orig_rsub(self.to(torch.int8), other)
     return orig_rsub(self, other)
-
-torch.Tensor.__sub__ = patched_sub
 torch.Tensor.__rsub__ = patched_rsub
 
+# 4. Parche para torch.finfo
 orig_finfo = torch.finfo
 def patched_finfo(dtype=None):
-    # Si la librería pasa un device en lugar de un dtype, usamos el dtype por defecto
     if dtype is not None and not isinstance(dtype, torch.dtype):
         return orig_finfo(torch.get_default_dtype())
     return orig_finfo(dtype)
 torch.finfo = patched_finfo
 
-# Configuración
-load_dotenv()
-DEVICE = "cuda:0"#os.environ.get("CUDA_DEVICE", "cuda:1")
-DEVICE2 = "cuda:1" if DEVICE == "cuda:0" else "cuda:0"
-print(f"⚙️ SERVIDOR: Usando dispositivo {DEVICE}")
+# 5. Parche para Qwen Config
+orig_from_model_config = GenerationConfig.from_model_config
+@classmethod
+def patched_from_model_config(cls, model_config, **kwargs):
+    for attr in ["text_config", "vision_config", "decoder_config"]:
+        if hasattr(model_config, attr):
+            sub_config = getattr(model_config, attr)
+            if isinstance(sub_config, dict):
+                setattr(model_config, attr, PretrainedConfig.from_dict(sub_config))
+    return orig_from_model_config(model_config, **kwargs)
+GenerationConfig.from_model_config = patched_from_model_config
+
+LAST_ACTIVITY_TIME = time.time()
+INACTIVITY_TIMEOUT = 60 * 15 # 15 minutos
+DEVICE = os.environ.get("DEVICE", "cuda:0")
+print(f"SERVIDOR: Usando dispositivo {DEVICE}")
 YOLO_PATH = os.environ.get("YOLO_MODEL_PATH")
 if not YOLO_PATH or not os.path.exists(YOLO_PATH):
-    print(f"⚠️ ADVERTENCIA: No se encontró el modelo YOLO en: {YOLO_PATH}")
+    print(f"ADVERTENCIA: No se encontró el modelo YOLO en: {YOLO_PATH}")
     print("Por favor configura YOLO_MODEL_PATH en el archivo .env")
+PORT_API = int(os.getenv("PORT_API", 7890))
 
 gpu_lock = threading.Lock()
+
+# Variables globales para la cola
+active_requests = 0
+pending_batch_tasks = 0
+queue_lock = threading.Lock()
+# Tiempos promedio iniciales (en segundos)
+avg_times = {
+    "detect": 5.0,
+    "inpaint": 25.0
+}
+# Guardaremos los últimos N tiempos para suavizar la estimación
+history_times = {"detect": [], "inpaint": []}
+
+def update_avg_time(task_type, new_time):
+    history_times[task_type].append(new_time)
+    if len(history_times[task_type]) > 10:
+        history_times[task_type].pop(0)
+    avg_times[task_type] = sum(history_times[task_type]) / len(history_times[task_type])
+
+def idle_model_cleaner():
+    global LAST_ACTIVITY_TIME
+    while True:
+        time.sleep(30)
+        elapsed = time.time() - LAST_ACTIVITY_TIME
+        if elapsed > INACTIVITY_TIMEOUT:
+            with gpu_lock:
+                loaded_models = [m for m in models if models[m] is not None]
+                if loaded_models:
+                    print(f"Servidor inactivo por {int(elapsed/60)} minutos. Descargando modelos: {loaded_models}")
+                    unload_models(to_unload=loaded_models)
+                    LAST_ACTIVITY_TIME = time.time()
 
 models = {
     "yolo": None,
     "sam": None,
+    "unet": None,
+    "segformer": None,
     "sdxl": None,
     "face": None,
     "flux": None,
@@ -103,43 +155,42 @@ models = {
 def clear_vram():
     gc.collect()
     torch.cuda.empty_cache()
+    time.sleep(0.1)
 
-def unload_heavy_models(except_model=None):
-    """Descarga modelos pesados excepto el solicitado"""
-    heavy = ["sdxl", "flux", "qwen"]
-    for m in heavy:
-        if m != except_model and models.get(m) is not None:
-            print(f"SERVIDOR: Descargando {m} para liberar VRAM...")
+def unload_models(to_unload: list):
+    for m in to_unload:
+        if m in models and models[m] is not None:
+            print(f"SERVIDOR: Descargando {m}...")
             models[m] = None
     clear_vram()
 
 def get_model(model_type, use_controlnet=False):
     global models
     
-    # --- GESTIÓN DE MODELOS PESADOS ---
     if model_type in ["sdxl", "flux", "qwen"]:
-        unload_heavy_models(except_model=model_type)
-        
         if model_type == "sdxl":
-             if models["sdxl"] is None or models["sdxl"].use_controlnet != use_controlnet:
+            unload_models(to_unload=["flux", "qwen"])
+            if models["sdxl"] is None or models["sdxl"].use_controlnet != use_controlnet:
                 print(f"SERVIDOR: Cargando SDXL (CN={use_controlnet})...")
                 models["sdxl"] = SDImpainting(DEVICE, use_controlnet=use_controlnet)
-             return models["sdxl"]
+            return models["sdxl"]
         
         elif model_type == "flux":
+            unload_models(to_unload=["sdxl", "qwen"])
             if models["flux"] is None:
                 print(f"SERVIDOR: Cargando Flux...")
-                models["flux"] = FluxImpainting(DEVICE2) 
+                models["flux"] = FluxImpainting(DEVICE) 
             return models["flux"]
 
         elif model_type == "qwen":
+            unload_models(to_unload=["sdxl", "flux", "face", "yolo", "sam", "unet", "segformer"])
             if models["qwen"] is None:
                 print(f"SERVIDOR: Cargando Qwen...")
-                models["qwen"] = QwenImpainting(DEVICE2)
+                models["qwen"] = QwenImpainting(DEVICE)
             return models["qwen"]
 
-    # --- MODELOS LIGEROS ---
     if models.get(model_type) is None:
+        unload_models(to_unload=["flux", "qwen"])
         print(f"SERVIDOR: Cargando {model_type} en {DEVICE}...")
         if model_type == "yolo":
             models["yolo"] = YOLOV8(device=DEVICE, model_path=YOLO_PATH)
@@ -147,6 +198,10 @@ def get_model(model_type, use_controlnet=False):
             models["sam"] = SAM2(DEVICE)
         elif model_type == "face":
             models["face"] = LangSAMFaceExtractor(device=DEVICE)
+        elif model_type == "unet":
+            models["unet"] = UNetInference(DEVICE)
+        elif model_type == "segformer":
+            models["segformer"] = SegformerInference(DEVICE)
             
     return models[model_type]
 
@@ -176,64 +231,92 @@ def img_to_base64(image_pil: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 def read_image_file(file_bytes) -> Image.Image:
-    return Image.open(io.BytesIO(file_bytes)).convert("RGB")
-
+    img = Image.open(io.BytesIO(file_bytes))
+    img = ImageOps.exif_transpose(img) 
+    return img
 
 app = FastAPI(title="Rebrot Inference Server")
 
 # --- ENDPOINTS ---
+@app.get("/queue_status")
+def get_queue_status():
+    with queue_lock:
+        # El tiempo estimado es el tiempo promedio de inpaint por los que están en cola
+        # (Es una simplificación, ya que no sabemos si son detect o inpaint)
+        total = active_requests + pending_batch_tasks
+        est_time = total * avg_times["inpaint"]
+        return {
+            "queue_size": total,
+            "estimated_wait_seconds": round(est_time, 1),
+            "status": "ocupado" if total > 0 else "libre"
+        }
+
+@app.post("/queue/register_batch")
+def register_batch(count: int = Form(...)):
+    global pending_batch_tasks
+    with queue_lock:
+        pending_batch_tasks += count
+    return {"pending": pending_batch_tasks}
+
 @app.post("/detect")
 def detect(
     file: UploadFile = File(...),
     confidence: float = Form(0.1),
-    dilatation: int = Form(10)
+    dilatation: int = Form(10),
+    seg_model: str = Form("yolo_sam")
 ):
+    global active_requests, pending_batch_tasks, LAST_ACTIVITY_TIME
+    LAST_ACTIVITY_TIME = time.time()
+    with queue_lock:
+        active_requests += 1
+        # Si venía de un lote, lo restamos de pendientes porque ya es activa
+        if pending_batch_tasks > 0: pending_batch_tasks -= 1
+
+    start = time.time()
+
     with gpu_lock:
         try:
-            # 1. Leer imagen
             contents = file.file.read()
             image_pil = read_image_file(contents)
             image_np = np.array(image_pil)
-            
-            with TempFileManager(image_pil, ".jpg") as temp_path:
-                # 2. YOLO
-                yolo = get_model("yolo")
-                yolo_preview, boxes = yolo.get_bounding_box(confidence, temp_path)
-                
-                if len(boxes) == 0:
-                    return {"status": "no_damage", "mask": None}
 
-                # 3. Face Detection
+            with TempFileManager(image_pil, ".jpg") as temp_path:
                 face = get_model("face")
                 face_mask_np, face_boxes = face(temp_path, return_results="both", mask_multiplier=255)
                 face_mask_np = fill_little_spaces(face_mask_np, 65)
+            
+                yolo_preview = None
+                if seg_model == "yolo_sam":
+                    yolo = get_model("yolo")
+                    yolo_preview, boxes = yolo.get_bounding_box(confidence, temp_path)
+                    if len(boxes) == 0:
+                        update_avg_time("detect", time.time() - start)
+                        return {"status": "no_damage", "mask": None}
+                    sam = get_model("sam")
+                    masks = sam.get_mask_by_bounding_boxes(boxes=boxes, image=image_np)
+                    numpy_masks = [mask.cpu().numpy() for mask in masks]
+                    combined_mask = np.zeros_like(numpy_masks[0], dtype=bool)
+                    for m in numpy_masks:
+                        combined_mask = np.logical_or(combined_mask, m)
+                    binary_mask = generate_binary_mask(combined_mask)
+
+                elif seg_model == "unet":
+                    unet = get_model("unet")
+                    binary_mask_rgb = unet.get_mask(image_np)
+                    binary_mask = (cv2.cvtColor(binary_mask_rgb, cv2.COLOR_RGB2GRAY) > 127).astype(np.uint8) * 255
                 
-                boxes_list = []
-                if face_boxes is not None:
-                    if hasattr(face_boxes, "tolist"):
-                        boxes_list = face_boxes.tolist()
-                    else:
-                        boxes_list = list(face_boxes)
+                elif seg_model == "segformer":
+                    segformer = get_model("segformer")
+                    binary_mask_rgb = segformer.get_mask(image_np)
+                    binary_mask = (cv2.cvtColor(binary_mask_rgb, cv2.COLOR_RGB2GRAY) > 127).astype(np.uint8) * 255
                 
-                # 4. SAM
-                sam = get_model("sam")
-                masks = sam.get_mask_by_bounding_boxes(boxes=boxes, image=image_np)
-                
-                # Combinar máscaras SAM
-                numpy_masks = [mask.cpu().numpy() for mask in masks]
-                combined_mask = np.zeros_like(numpy_masks[0], dtype=bool)
-                for m in numpy_masks:
-                    combined_mask = np.logical_or(combined_mask, m)
-                    
-                binary_mask = generate_binary_mask(combined_mask)
-                
-                # 5. Refinamiento
                 refined = delete_irrelevant_detected_pixels(binary_mask)
                 refined = fill_little_spaces(refined)
                 dilated = soften_contours(refined, dilatation)
                 
-                # 6. Restar Caras
                 mask_damage = Image.fromarray(dilated, mode='L')
+                if mask_damage.size != image_pil.size:
+                    mask_damage = mask_damage.resize(image_pil.size, resample=Image.NEAREST)
                 mask_face = Image.fromarray(face_mask_np).convert("L")
                 
                 mask_damage_np = np.array(mask_damage)
@@ -246,19 +329,24 @@ def detect(
                 face_mask_pil = Image.fromarray(mask_face_np)
                 raw_mask_pil = Image.fromarray(binary_mask)
                 
-                # Retornar imágenes codificadas
+                clear_vram()
+                update_avg_time("detect", time.time() - start)
                 return JSONResponse({
                     "status": "success",
                     "mask": img_to_base64(final_mask_pil),
                     "face_mask": img_to_base64(face_mask_pil),
                     "raw_mask": img_to_base64(raw_mask_pil),
-                    "face_boxes": boxes_list,
+                    "face_boxes": face_boxes.tolist() if face_boxes is not None else [],
                     "yolo_preview": img_to_base64(yolo_preview) if yolo_preview else None
                 })
 
         except Exception as e:
-            print(f"❌ Server Error /detect: {e}")
+            print(f"Server Error /detect: {e}")
+            traceback.print_exc()
             return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+        finally:
+            with queue_lock:
+                active_requests -= 1
 
 @app.post("/inpaint")
 def inpaint(
@@ -267,7 +355,7 @@ def inpaint(
     face_mask: UploadFile = File(None),
     raw_mask: UploadFile = File(None),
     prompt: str = Form(...),
-    negative_prompt: str = Form(...),
+    negative_prompt: str = Form(""),
     strength: float = Form(0.99),
     guidance: float = Form(7.5),
     steps: int = Form(20),
@@ -278,13 +366,26 @@ def inpaint(
     use_controlnet: bool = Form(False),
     model_variant: str = Form("sdxl"),
 ):
+    global active_requests, pending_batch_tasks, LAST_ACTIVITY_TIME
+    LAST_ACTIVITY_TIME = time.time()
+    with queue_lock:
+        active_requests += 1
+        if pending_batch_tasks > 0: pending_batch_tasks -= 1
+    
+    start = time.time()
+
     with gpu_lock:
         try:
             img_pil = read_image_file(image.file.read())
+            original_dpi = img_pil.info.get('dpi', (600, 600))
+            print(f"SERVIDOR: DPI original de la imagen: {original_dpi}")
+            exif_data = img_pil.info.get('exif', None)
+            img_pil = img_pil.convert("RGB")
             mask_pil = Image.open(io.BytesIO(mask.file.read())).convert("L")
 
             inpainter = get_model(model_variant, use_controlnet=use_controlnet)
             padding_val = padding_crop if use_padding else None
+            start_time = time.time()
             
             with TempFileManager(img_pil, ".png") as t_img_path, \
                 TempFileManager(mask_pil, ".png") as t_mask_path:
@@ -307,7 +408,7 @@ def inpaint(
                 restored = inpainter.impaint(**main_kwargs)
                 
                 # 2. Componer Rostros Originales (Anti-alucinación)
-                if face_mask:
+                if face_mask and model_variant != "qwen":
                     f_mask_bytes = face_mask.file.read()
                     f_mask_pil = Image.open(io.BytesIO(f_mask_bytes)).convert("L")
                     f_mask_pil = ImageOps.autocontrast(f_mask_pil)
@@ -317,9 +418,9 @@ def inpaint(
                     restored = Image.composite(orig_rgba, restored, f_mask_pil)
                     
                 # 3. Enhance Faces
-                print(f"✨ SERVIDOR: Enhance Faces={enhance_faces}, Face Boxes={face_boxes_str}...")
+                print(f"SERVIDOR: Enhance Faces={enhance_faces}, Face Boxes={face_boxes_str}...")
                 if enhance_faces and raw_mask and face_boxes_str != "[]" and model_variant != "qwen":
-                    print("✨ Servidor: Mejorando rostros...")
+                    print("Servidor: Mejorando rostros...")
                     face_boxes = json.loads(face_boxes_str)
                     raw_mask_bytes = raw_mask.file.read()
                     raw_mask_pil = Image.open(io.BytesIO(raw_mask_bytes)).convert("L")
@@ -376,13 +477,59 @@ def inpaint(
                                 final_paste = Image.fromarray(rgba_arr, mode="RGBA")
                                 restored.paste(final_paste, (x2, y1-enhanced_face.size[1]), final_paste)
             
+            try:
+                if original_dpi and isinstance(original_dpi, (tuple, list)):
+                    dpi_to_save = (int(round(original_dpi[0])), int(round(original_dpi[1])))
+                else:
+                    dpi_to_save = (600, 600)
+            except:
+                dpi_to_save = (600, 600)
+            
             buf = io.BytesIO()
-            restored.save(buf, format="PNG")
-            return Response(content=buf.getvalue(), media_type="image/png")
+            
+            save_params = {
+                "format": "JPEG",
+                "quality": 100,
+                "dpi": dpi_to_save,
+                "optimize": False
+            }
+            if exif_data is not None:
+                save_params["exif"] = exif_data
+
+            restored.convert("RGB").save(buf, **save_params)
+            print(f"SERVIDOR: Imagen restaurada en {time.time() - start_time:.2f} segundos.")
+            clear_vram()
+            update_avg_time("inpaint", time.time() - start)
+            return Response(content=buf.getvalue(), media_type="image/jpeg")
 
         except Exception as e:
-            print(f"❌ Server Error /inpaint: {e}")
+            print(f"Server Error /inpaint: {e}")
+            traceback.print_exc()
             return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+        
+        finally:
+            with queue_lock:
+                active_requests -= 1
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "timestamp": time.time()}
+
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Si el mensaje contiene "/queue_status" o "/health", devolvemos False para no mostrarlo
+        message = record.getMessage()
+        return message.find("/queue_status") == -1 and message.find("/health") == -1
+
+# Aplicamos el filtro al logger de acceso de uvicorn
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=7890)
+    cleaner_thread = threading.Thread(target=idle_model_cleaner, daemon=True)
+    cleaner_thread.start()
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=PORT_API,
+        timeout_keep_alive=6000,
+    )

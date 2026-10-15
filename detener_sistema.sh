@@ -23,10 +23,11 @@ echo "🧠 Stopping Inference Server (Port $PORT_API)..."
 fuser -k $PORT_API/tcp 2>/dev/null
 # Then by process name (Crucial for freeing up GPU VRAM)
 pkill -f inference_server.py
+pkill -f watchdog.py
 
 # 4. Cleanup (Optional)
 # If you want to clear the logs when stopping, uncomment the next line:
-# rm logs/*.log
+#rm logs/*.log
 
 echo "---------------------------------------"
 echo "✅ All processes terminated."

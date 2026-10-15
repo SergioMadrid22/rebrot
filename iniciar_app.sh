@@ -2,10 +2,11 @@
 
 # ================= CONFIGURACIÓN =================
 # Elige el nombre que quieres para tu URL (ej: https://rebrot-vrain.loophole.site)
-HOSTNAME_DESEADO="rebrot-vrain" 
+HOSTNAME_DESEADO="rebrot-vrain-batch" 
 
 # Carpeta de entorno virtual
 VENV_DIR=".venv"
+VENV_PYTHON="./venv/bin/python3"
 
 # Puerto de Gradio
 PORT=7860
@@ -18,17 +19,17 @@ PID=$(lsof -t -i:$PORT)
 if [ -n "$PID" ]; then
   kill -9 $PID
 fi
-pkill -f loophole
+#pkill -f loophole
 # ----------------------------------------
 
 # 2. Activar entorno virtual
-if [ -d "$VENV_DIR" ]; then
-    source $VENV_DIR/bin/activate
-fi
-
+#if [ -d "$VENV_DIR" ]; then
+#    source $VENV_DIR/bin/activate
+#fi
+#
 # 3. Lanzar App Gradio
-echo "🚀 Lanzando main_yolo.py..."
-nohup python3 -u main_yolo.py > app_output.log 2>&1 &
+echo "🚀 Lanzando batch_processor.py..."
+nohup $VENV_PYTHON -u batch_processor.py > logs/app_output.log 2>&1 &
 APP_PID=$!
 
 # Esperar a que Gradio arranque
@@ -42,7 +43,7 @@ echo "✅ App online."
 # Asume que el binario 'loophole' está en la misma carpeta
 if [ -f "./loophole" ]; then
     echo "🌍 Publicando en: https://$HOSTNAME_DESEADO.loophole.site"
-    nohup ./loophole http $PORT --hostname $HOSTNAME_DESEADO > tunnel_output.log 2>&1 &
+    nohup ./loophole http $PORT --hostname $HOSTNAME_DESEADO > logs/tunnel_output.log 2>&1 &
 else
     echo "❌ Error: No encuentro el archivo './loophole'. Descárgalo primero."
 fi

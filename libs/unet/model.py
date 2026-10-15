@@ -107,16 +107,14 @@ class UNet(nn.Module):
 
         return out
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CHECKPOINT_PATH = os.path.join(BASE_DIR, "checkpoints/unet_segmentationlosspeopleandfn.pth") # checkpoints/unet_segmentation_retrain.pth
-
+CHECKPOINT_PATH = "checkpoints/unet_segmentationlosspeopleandfn.pth"
 
 class UNetInference:
     def __init__(self, device: str):        
         torch.cuda.empty_cache()
         gc.collect()
         self.predictor = UNet(n_class = 1)
-        self.predictor.load_state_dict(torch.load(CHECKPOINT_PATH, weights_only=True))
+        self.predictor.load_state_dict(torch.load(CHECKPOINT_PATH, weights_only=True, map_location=device))
         self.predictor = self.predictor.to(device)
         self.device = device
         self.transformations = T.Compose([

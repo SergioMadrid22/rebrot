@@ -2,7 +2,7 @@
 
 # ================= CONFIGURACIÓN =================
 TARGET_USER="salvem"
-APP_SCRIPT="batch_processor_user_files.py"
+APP_SCRIPT="batch_processor.py"
 PORT=7860
 # =================================================
 

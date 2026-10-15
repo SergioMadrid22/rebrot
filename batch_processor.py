@@ -23,11 +23,13 @@ from utils import (
     crop_image,
     delete_files
 )
+import patches
 
 load_dotenv()
 
 # Configuración del dispositivo para modelos
-DEVICE = os.environ.get("CUDA_DEVICE")
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+DEVICE = os.environ.get("DEVICE")
 # DEVICE = "cuda:0"
 print(f"DEVICE {DEVICE}")
 
@@ -76,7 +78,7 @@ def get_current_processing_state():
 # Función que maneja el clic del botón, inicia el procesamiento y actualiza el estado (sin deshabilitar el botón)
 def handle_processing_click(lista_elementos_seleccionados, segmentation_models):
     global shared_processing_data, is_processing
-
+    print(f"Archivos seleccionados: {lista_elementos_seleccionados}")
     # Si ya hay un proceso en curso, notificamos y devolvemos el estado actual
     if is_processing:
         # El estado del botón no se controla aquí directamente
@@ -289,7 +291,10 @@ def handle_processing_click(lista_elementos_seleccionados, segmentation_models):
 
                 # Componer: donde la máscara es blanca, tomar de original; donde es negra, dejar el resultado
                 new_image = Image.composite(
-                    original_image, result_crop, full_face_mask)
+                    result_crop, original_image, processed_mask)
+                
+                new_image = Image.composite(
+                    original_image, new_image, full_face_mask)
 
                 print("Conservacion de rostros exitosa")
 
@@ -433,11 +438,13 @@ with gr.Blocks(title="AI-Impainter: Restauración de Fotos de la DANA") as demo:
     )
 
     # Componente FileExplorer para seleccionar archivos/carpetas.
-    file_explorer = gr.FileExplorer(
-        root_dir=home_directory,
-        file_count="multiple",
-        label=f"📂 Selecciona las Imágenes a Restaurar (Inicio: {home_directory})"
+    file_explorer = gr.File(
+            file_count="multiple",
+            file_types=["image"],
+            label="Sube o arrastra las fotos aquí"
     )
+    # Esto solo para debuggear: verás en la consola qué se selecciona en tiempo real
+    #file_explorer.change(fn=lambda x: print(f"Selección actual: {x}"), inputs=[file_explorer])
 
     # Componente Textbox para mostrar mensajes de estado general del proceso.
     # Se actualizará al cargar la página y al presionar el botón.
@@ -498,5 +505,8 @@ with gr.Blocks(title="AI-Impainter: Restauración de Fotos de la DANA") as demo:
 
 
 # Lanzamos la interfaz de Gradio.
-demo.launch(server_name="0.0.0.0", server_port=7861, debug=True, auth=(os.environ.get(
-    "APP_USER"), os.environ.get("APP_PASSWORD")))
+demo.launch(server_name="127.0.0.1",
+            server_port=7860,
+            debug=True,
+            #auth=(os.environ.get("APP_USER"), os.environ.get("APP_PASSWORD"))
+        )

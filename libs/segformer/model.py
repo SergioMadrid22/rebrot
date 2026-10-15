@@ -9,7 +9,7 @@ from torchvision import transforms as T
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 import json
 
-with open("/home/salvem/hugoa/secret.json", "r") as f:
+with open("secret.json", "r") as f:
     secret = json.load(f)
 
 
@@ -30,11 +30,7 @@ class SegformerDANA(nn.Module):
         logits = self.conv(logits)
         return logits.reshape((b, 1, 1024, 1024))
 
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CHECKPOINT_PATH = os.path.join(
-    BASE_DIR, "/home/salvem/hugoa/output/segformer.pth")
-
+CHECKPOINT_PATH = "checkpoints/segformer.pth"
 
 class SegformerInference:
     def __init__(self, device: str):
@@ -42,7 +38,7 @@ class SegformerInference:
         gc.collect()
         self.predictor = SegformerDANA(token=secret["hf"])
         self.predictor.load_state_dict(
-            torch.load(CHECKPOINT_PATH, weights_only=True))
+            torch.load(CHECKPOINT_PATH, weights_only=True, map_location=device))
         self.predictor = self.predictor.to(device)
         self.device = device
         self.processor = SegformerImageProcessor.from_pretrained(

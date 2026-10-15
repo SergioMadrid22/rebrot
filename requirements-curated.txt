@@ -1,0 +1,15 @@
+gradio
+uvicorn
+fastapi
+numpy
+dotenv
+opencv-python
+pillow
+scikit-image
+torch
+torchvision
+transformers
+diffusers
+ultralytics
+segment-anything
+segment-geospatial[samgeo2]

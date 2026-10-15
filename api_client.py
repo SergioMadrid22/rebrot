@@ -4,8 +4,12 @@ from PIL import Image
 import io
 import base64
 import binascii
+import traceback
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-API_URL = "http://127.0.0.1:7890"
+API_URL = f"http://127.0.0.1:{int(os.getenv('PORT_API', 7890))}"
 
 def decode_image(hex_str):
     if not hex_str: return None
@@ -22,10 +26,14 @@ def decode_image_b64(b64_str):
         print(f"Error decodificando imagen: {e}")
         return None
 
-def detect_damage(image_path, confidence, dilatation):
+def detect_damage(image_path, confidence, dilatation, seg_model="yolo_sam"):
     with open(image_path, "rb") as f:
         files = {"file": f}
-        data = {"confidence": str(confidence), "dilatation": str(dilatation)}
+        data = {
+            "confidence": str(confidence), 
+            "dilatation": str(dilatation),
+            "seg_model": seg_model,
+        }
         
         try:
             res = requests.post(f"{API_URL}/detect", files=files, data=data)
@@ -48,12 +56,7 @@ def detect_damage(image_path, confidence, dilatation):
             if res_json.get("status") == "no_damage":
                 return None, None, [], None, None
             
-            # 3. Validar que las claves existen antes de acceder
-            if "yolo_preview" not in res_json:
-                raise Exception(f"Respuesta inválida del servidor. Claves recibidas: {list(res_json.keys())}")
-
-            # Decodificar resultados
-            yolo_preview = decode_image_b64(res_json["yolo_preview"])
+            yolo_preview = decode_image_b64(res_json.get("yolo_preview"))
             mask = decode_image_b64(res_json["mask"])
             face_mask = decode_image_b64(res_json["face_mask"])
             raw_mask = decode_image_b64(res_json["raw_mask"])
@@ -97,7 +100,7 @@ def restore_image(image_path, mask_pil, face_mask_pil, raw_mask_pil, boxes, para
         data['use_controlnet'] = str(data['use_controlnet']).lower() 
     
     try:
-        res = requests.post(f"{API_URL}/inpaint", files=files, data=data)
+        res = requests.post(f"{API_URL}/inpaint", files=files, data=data, timeout=600)
         
         if res.status_code == 200:
             # La respuesta es directamente la imagen binaria (bytes), no JSON
@@ -111,4 +114,21 @@ def restore_image(image_path, mask_pil, face_mask_pil, raw_mask_pil, boxes, para
             raise Exception(f"Fallo en Inpainting: {msg}")
             
     except Exception as e:
+        traceback.print_exc()
         raise Exception(f"Error comunicando con API Inpainting: {e}")
+    
+
+def register_server_batch(count):
+    try:
+        requests.post(f"{API_URL}/queue/register_batch", data={"count": count}, timeout=2)
+    except:
+        pass
+
+def get_server_queue():
+    try:
+        res = requests.get(f"{API_URL}/queue_status", timeout=2)
+        if res.status_code == 200:
+            return res.json()
+    except:
+        return {"queue_size": 0, "estimated_wait_seconds": 0, "status": "offline"}
+    return {"queue_size": 0, "estimated_wait_seconds": 0, "status": "unknown"}
