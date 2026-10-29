@@ -8,7 +8,7 @@ El desarrollo se enmarca en la iniciativa solidaria e institucional **"Salvem le
 
 ---
 
-## 🏛️ Arquitectura del Sistema
+## Arquitectura del Sistema
 
 El proyecto está modularizado en dos capas principales para permitir la escalabilidad:
 
@@ -18,7 +18,7 @@ El proyecto está modularizado en dos capas principales para permitir la escalab
 
 ---
 
-## 📋 Requisitos Previos
+## Requisitos Previos
 
 * **SO:** Linux (Probado en Ubuntu 22.04 LTS).
 * **Hardware:** Tarjeta NVIDIA con al menos **24 GB de VRAM** (RTX 3090, RTX 4090, A40 o superior).
@@ -27,7 +27,7 @@ El proyecto está modularizado en dos capas principales para permitir la escalab
 
 ---
 
-## 🛠️ Instalación
+## Instalación
 
 Siga estos pasos para la instalación:
 
@@ -61,7 +61,7 @@ HUGGINGFACE_HUB_TOKEN=tu_token_de_hf
 
 ---
 
-## 📂 Estructura de Checkpoints
+## Estructura de Checkpoints
 
 Asegúrate de colocar los pesos de los modelos entrenados en el directorio `checkpoints/`:
 * `checkpoints/yolo.pt` (Detección de daños acoplada a SAM2)
@@ -70,7 +70,7 @@ Asegúrate de colocar los pesos de los modelos entrenados en el directorio `chec
 
 ---
 
-## 🚀 Ejecución
+## Ejecución
 
 El script de inicio lanza el **Watchdog** en segundo plano, el cual levanta automáticamente el backend de inferencia, la interfaz gráfica de Gradio y expone la URL pública mediante túnel seguro (Loophole):
 
@@ -88,7 +88,7 @@ Para detener todos los servicios vinculados:
 
 ---
 
-## 🤖 Modelos Disponibles
+## Modelos Disponibles
 
 * **Qwen-Image-Edit:** Edición global basada en instrucciones de texto. Entiende el contexto semántico completo de la imagen y no requiere de máscaras manuales de daño.
 * **Stable Diffusion XL 1.0 Inpainting:** Inpainting latente de alta fidelidad. Ideal para reconstrucciones locales y fondos acotados por máscara.
@@ -98,12 +98,12 @@ Para detener todos los servicios vinculados:
 
 ---
 
-## 🤝 Agradecimientos y Financiación
+## Agradecimientos y Financiación
 
 Este proyecto ha sido desarrollado en el marco de la iniciativa solidaria **"Salvem les fotos UPV / Recuperar las memorias"**, impulsada tras las inundaciones provocadas por la DANA de octubre de 2024 en la provincia de Valencia.
 
 <p align="center">
-  <img src="static/banner_agradecimientos.jpg" alt="Agradecimientos y Financiación" width="850"/>
+  <img src="static/banner-agradecimientos.jpg" alt="Agradecimientos y Financiación" width="850"/>
 </p>
 
 ### Entidades Financiadoras y Colaboradoras:
